@@ -85,6 +85,14 @@ func TestEchoStatic(t *testing.T) {
 			expectBodyStartsWith: string([]byte{0x89, 0x50, 0x4e, 0x47}),
 		},
 		{
+			name:                 "ok with relative path for root points to directory",
+			givenPrefix:          "/images",
+			givenRoot:            "./_fixture/images",
+			whenURL:              "/images/walle.png",
+			expectStatus:         http.StatusOK,
+			expectBodyStartsWith: string([]byte{0x89, 0x50, 0x4e, 0x47}),
+		},
+		{
 			name:                 "No file",
 			givenPrefix:          "/images",
 			givenRoot:            "_fixture/scripts",
@@ -211,7 +219,6 @@ func TestEchoStatic(t *testing.T) {
 }
 
 func TestEchoStaticRedirectIndex(t *testing.T) {
-	assert := assert.New(t)
 	e := New()
 
 	// HandlerFunc
@@ -220,23 +227,25 @@ func TestEchoStaticRedirectIndex(t *testing.T) {
 	errCh := make(chan error)
 
 	go func() {
-		errCh <- e.Start("127.0.0.1:1323")
+		errCh <- e.Start(":0")
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	err := waitForServerStart(e, errCh, false)
+	assert.NoError(t, err)
 
-	if resp, err := http.Get("http://127.0.0.1:1323/static"); err == nil {
+	addr := e.ListenerAddr().String()
+	if resp, err := http.Get("http://" + addr + "/static"); err == nil { // http.Get follows redirects by default
 		defer resp.Body.Close()
-		assert.Equal(http.StatusOK, resp.StatusCode)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 		if body, err := ioutil.ReadAll(resp.Body); err == nil {
-			assert.Equal(true, strings.HasPrefix(string(body), "<!doctype html>"))
+			assert.Equal(t, true, strings.HasPrefix(string(body), "<!doctype html>"))
 		} else {
-			assert.Fail(err.Error())
+			assert.Fail(t, err.Error())
 		}
 
 	} else {
-		assert.Fail(err.Error())
+		assert.NoError(t, err)
 	}
 
 	if err := e.Close(); err != nil {
@@ -245,11 +254,54 @@ func TestEchoStaticRedirectIndex(t *testing.T) {
 }
 
 func TestEchoFile(t *testing.T) {
-	e := New()
-	e.File("/walle", "_fixture/images/walle.png")
-	c, b := request(http.MethodGet, "/walle", e)
-	assert.Equal(t, http.StatusOK, c)
-	assert.NotEmpty(t, b)
+	var testCases = []struct {
+		name             string
+		givenPath        string
+		givenFile        string
+		whenPath         string
+		expectCode       int
+		expectStartsWith string
+	}{
+		{
+			name:             "ok",
+			givenPath:        "/walle",
+			givenFile:        "_fixture/images/walle.png",
+			whenPath:         "/walle",
+			expectCode:       http.StatusOK,
+			expectStartsWith: string([]byte{0x89, 0x50, 0x4e}),
+		},
+		{
+			name:             "ok with relative path",
+			givenPath:        "/",
+			givenFile:        "./go.mod",
+			whenPath:         "/",
+			expectCode:       http.StatusOK,
+			expectStartsWith: "module github.com/labstack/echo/v",
+		},
+		{
+			name:             "nok file does not exist",
+			givenPath:        "/",
+			givenFile:        "./this-file-does-not-exist",
+			whenPath:         "/",
+			expectCode:       http.StatusNotFound,
+			expectStartsWith: "{\"message\":\"Not Found\"}\n",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := New() // we are using echo.defaultFS instance
+			e.File(tc.givenPath, tc.givenFile)
+
+			c, b := request(http.MethodGet, tc.whenPath, e)
+			assert.Equal(t, tc.expectCode, c)
+
+			if len(b) > len(tc.expectStartsWith) {
+				b = b[:len(tc.expectStartsWith)]
+			}
+			assert.Equal(t, tc.expectStartsWith, b)
+		})
+	}
 }
 
 func TestEchoMiddleware(t *testing.T) {
@@ -716,13 +768,16 @@ func TestEchoNotFound(t *testing.T) {
 
 func TestEchoMethodNotAllowed(t *testing.T) {
 	e := New()
+
 	e.GET("/", func(c Context) error {
 		return c.String(http.StatusOK, "Echo!")
 	})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
+
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.Equal(t, "OPTIONS, GET", rec.Header().Get(HeaderAllow))
 }
 
 func TestEchoContext(t *testing.T) {
@@ -957,7 +1012,7 @@ func TestEchoStartTLSByteString(t *testing.T) {
 			e := New()
 			e.HideBanner = true
 
-			errChan := make(chan error, 0)
+			errChan := make(chan error)
 
 			go func() {
 				errChan <- e.StartTLS(":0", test.cert, test.key)
@@ -995,7 +1050,7 @@ func TestEcho_StartAutoTLS(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := New()
-			errChan := make(chan error, 0)
+			errChan := make(chan error)
 
 			go func() {
 				errChan <- e.StartAutoTLS(tc.addr)
